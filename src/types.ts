@@ -41,6 +41,11 @@ export interface PlayerState {
   invulnerableTimer: number;
   shootCooldown: number;
   state: 'idle' | 'run' | 'jump' | 'fall' | 'hit' | 'crouch';
+  walkCycle: number;
+  squashStretch: number;
+  tiltAngle: number;
+  blinkTimer: number;
+  eyeBlinking: boolean;
 }
 
 export type EnemyType = 
@@ -50,6 +55,8 @@ export type EnemyType =
   | 'iceslider'
   | 'geyserbug'
   | 'drona_boss'
+  | 'cryo_boss'
+  | 'pyro_boss'
   | 'zorgax_boss';
 
 export interface Enemy {
@@ -73,6 +80,11 @@ export interface Enemy {
   shootTimer?: number;
   isDefeated?: boolean;
   defeatTimer?: number;
+  hitFlashTimer?: number;
+  animCycle?: number;
+  bossAction?: 'hover' | 'aim' | 'slam' | 'stunned' | 'recover' | 'swoop' | 'recharge' | 'mortar' | 'overheat';
+  actionTimer?: number;
+  slamTargetX?: number;
 }
 
 export type BlockType = 
@@ -130,6 +142,7 @@ export interface Projectile {
   color: string;
   damage: number;
   lifespan: number;
+  gravity?: number;
 }
 
 export interface Particle {

@@ -233,8 +233,16 @@ export default function App() {
           const isBoss = levelConfig.isBossLevel;
           const newCrystals = isBoss ? Math.min(4, progress.crystalsCollected + 1) : progress.crystalsCollected;
 
+          // Unlock progression for next level and next world
+          const nextLvl = nextLevelId;
+          const currentWorldIdx = WORLDS.findIndex(w => w.levels.some(l => l.id === currentLevelId));
+          const nextWorldIdx = nextLvl ? WORLDS.findIndex(w => w.levels.some(l => l.id === nextLvl)) : currentWorldIdx;
+          const updatedUnlockedWorld = Math.max(progress.unlockedWorld || 1, nextWorldIdx + 1);
+
           saveProgress({
             ...progress,
+            unlockedWorld: updatedUnlockedWorld,
+            unlockedLevelId: nextLvl || progress.unlockedLevelId,
             crystalsCollected: newCrystals,
             completedLevels: {
               ...progress.completedLevels,

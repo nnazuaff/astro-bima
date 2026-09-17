@@ -20,6 +20,10 @@ export interface GameState {
   isLevelCleared: boolean;
   isGameOver: boolean;
   screenShake: number;
+  goal: { x: number; y: number };
+  isBossLevel?: boolean;
+  bossDefeatTimer?: number;
+  bossDefeatedName?: string;
 }
 
 export function getCameraTarget(
@@ -72,7 +76,9 @@ export function initLevelState(
   viewportWidth: number = 800,
   viewportHeight: number = 600
 ): GameState {
-  const levelWidth = Math.max(2800, config.goal.x + 300);
+  const isBoss = !!config.isBossLevel;
+  const rightWall = config.blocks.find(b => b.id.includes('wall_r'));
+  const levelWidth = isBoss && rightWall ? rightWall.x + rightWall.width : Math.max(2800, config.goal.x + 300);
   const levelHeight = 600;
 
   const player: PlayerState = {
@@ -98,7 +104,12 @@ export function initLevelState(
     canDoubleJump: true,
     invulnerableTimer: 0,
     shootCooldown: 0,
-    state: 'idle'
+    state: 'idle',
+    walkCycle: 0,
+    squashStretch: 1.0,
+    tiltAngle: 0,
+    blinkTimer: 2.5,
+    eyeBlinking: false
   };
 
   const blocks: PlatformBlock[] = config.blocks.map(b => ({
@@ -119,7 +130,9 @@ export function initLevelState(
     timer: 0,
     shootTimer: 0,
     isDefeated: false,
-    defeatTimer: 0
+    defeatTimer: 0,
+    hitFlashTimer: 0,
+    animCycle: Math.random() * 10
   }));
 
   const checkpoints: Checkpoint[] = config.checkpoints.map(cp => ({
@@ -149,7 +162,9 @@ export function initLevelState(
     timeLeft: config.timeLimit,
     isLevelCleared: false,
     isGameOver: false,
-    screenShake: 0
+    screenShake: 0,
+    goal: { ...config.goal },
+    isBossLevel: isBoss
   };
 }
 
@@ -259,12 +274,14 @@ export function updatePhysics(
     p.isGrounded = false;
     p.coyoteTimer = 0;
     p.jumpBufferTimer = 0;
+    p.squashStretch = 1.26;
     soundManager.playJump();
     spawnDustParticles(state, p.x + p.width / 2, p.y + p.height);
   } else if (input.jump && !p.jumpHeld && !p.isGrounded && p.canDoubleJump && p.powerUp === 'jetpack') {
     // Jetpack Double Jump
     p.vy = baseJumpForce * 0.95;
     p.canDoubleJump = false;
+    p.squashStretch = 1.22;
     soundManager.playDoubleJump();
     spawnJetpackParticles(state, p.x + p.width / 2, p.y + p.height);
   }
@@ -356,6 +373,10 @@ export function updatePhysics(
     if (checkAABB(p, block)) {
       if (p.vy > 0) {
         // Landing on top of block
+        if (!p.isGrounded && p.vy > 2.5) {
+          p.squashStretch = 0.74; // Impact squash upon landing
+          spawnDustParticles(state, p.x + p.width / 2, block.y);
+        }
         p.y = block.y - p.height;
         p.vy = 0;
         p.isGrounded = true;
@@ -364,6 +385,7 @@ export function updatePhysics(
         if (block.type === 'bouncy_mushroom') {
           p.vy = -16.5;
           p.isGrounded = false;
+          p.squashStretch = 1.35;
           soundManager.playBounce();
           spawnSparkleParticles(state, block.x + block.width / 2, block.y, '#10b981');
         }
@@ -445,14 +467,60 @@ export function updatePhysics(
     }
   }
 
+  // Player State & Animation Physics
+  if (p.invulnerableTimer > 1.2) {
+    p.state = 'hit';
+  } else if (p.isCrouching) {
+    p.state = 'crouch';
+  } else if (!p.isGrounded) {
+    p.state = p.vy < 0 ? 'jump' : 'fall';
+  } else if (Math.abs(p.vx) > 0.4) {
+    p.state = 'run';
+  } else {
+    p.state = 'idle';
+  }
+
+  // Smooth Walk Cycle and Tilting
+  if (p.isGrounded) {
+    if (Math.abs(p.vx) > 0.3) {
+      p.walkCycle = (p.walkCycle || 0) + Math.abs(p.vx) * dt * 9;
+    } else {
+      p.walkCycle = 0;
+    }
+    const targetTilt = p.vx * 0.028;
+    p.tiltAngle = (p.tiltAngle || 0) + (targetTilt - (p.tiltAngle || 0)) * 0.25;
+  } else {
+    const targetTilt = p.vx * 0.018;
+    p.tiltAngle = (p.tiltAngle || 0) + (targetTilt - (p.tiltAngle || 0)) * 0.15;
+  }
+
+  // Elastic return to natural scale (squash & stretch recovery)
+  const targetSquash = p.isCrouching ? 0.65 : 1.0;
+  p.squashStretch = (p.squashStretch || 1.0) + (targetSquash - (p.squashStretch || 1.0)) * 0.15;
+
+  // Eye Blinking Animation Timer
+  p.blinkTimer = (p.blinkTimer || 2.5) - dt;
+  if (p.blinkTimer <= 0) {
+    p.eyeBlinking = true;
+    if (p.blinkTimer < -0.15) {
+      p.eyeBlinking = false;
+      p.blinkTimer = 2.5 + Math.random() * 2.5;
+    }
+  } else {
+    p.eyeBlinking = false;
+  }
+
   // Projectiles update
   for (let i = state.projectiles.length - 1; i >= 0; i--) {
     const proj = state.projectiles[i];
     proj.x += proj.vx;
     proj.y += proj.vy;
+    if (proj.gravity) {
+      proj.vy += proj.gravity;
+    }
     proj.lifespan -= dt;
 
-    if (proj.lifespan <= 0 || proj.x < 0 || proj.x > state.levelWidth) {
+    if (proj.lifespan <= 0 || proj.x < 0 || proj.x > state.levelWidth || proj.y > 600) {
       state.projectiles.splice(i, 1);
       continue;
     }
@@ -468,13 +536,34 @@ export function updatePhysics(
           proj.y < enemy.y + enemy.height
         ) {
           enemy.health -= proj.damage;
+          enemy.hitFlashTimer = 0.25;
           spawnSparkleParticles(state, enemy.x + enemy.width / 2, enemy.y + enemy.height / 2, '#38bdf8');
           soundManager.playStomp();
           state.projectiles.splice(i, 1);
 
           if (enemy.health <= 0) {
             enemy.isDefeated = true;
-            p.score += 250;
+            if (enemy.type.includes('boss')) {
+              enemy.defeatTimer = 2.2;
+              state.bossDefeatTimer = 2.2;
+              state.bossDefeatedName = enemy.type;
+              p.score += 3000;
+              soundManager.playLevelClear();
+              spawnBossExplosion(state, enemy.x + enemy.width / 2, enemy.y + enemy.height / 2);
+              for (let s = 0; s < 6; s++) {
+                state.items.push({
+                  id: `stardust_boss_${Date.now()}_${s}`,
+                  type: 'stardust',
+                  x: enemy.x + (Math.random() - 0.5) * 120,
+                  y: enemy.y + (Math.random() - 0.5) * 80,
+                  width: 24,
+                  height: 24,
+                  collected: false
+                });
+              }
+            } else {
+              p.score += 250;
+            }
           }
           break;
         }
@@ -497,6 +586,10 @@ export function updatePhysics(
   for (const enemy of state.enemies) {
     if (enemy.isDefeated) continue;
     enemy.timer += dt;
+    enemy.animCycle = (enemy.animCycle || 0) + dt * 6;
+    if (enemy.hitFlashTimer && enemy.hitFlashTimer > 0) {
+      enemy.hitFlashTimer -= dt;
+    }
 
     // Movement AI based on enemy type
     if (enemy.type === 'botlet') {
@@ -540,28 +633,212 @@ export function updatePhysics(
         });
       }
     } else if (enemy.type === 'drona_boss') {
-      // Mini-boss flight & attack pattern
-      enemy.x = enemy.patrolStartX + Math.cos(enemy.timer * 1.5) * 220;
-      enemy.y = enemy.startY + Math.sin(enemy.timer * 3) * 60;
+      // Sektor 1 Boss: Drona-Botanika (Swoop & Recharge Pattern)
+      enemy.bossAction = enemy.bossAction || 'hover';
+      enemy.actionTimer = (enemy.actionTimer || 0) + dt;
       enemy.shootTimer = (enemy.shootTimer || 0) + dt;
 
-      if (enemy.shootTimer > 2.8) {
-        enemy.shootTimer = 0;
-        // Shoot 2 aimed spore/ice/lava projectiles
-        const angle = Math.atan2((p.y + p.height / 2) - enemy.y, (p.x + p.width / 2) - enemy.x);
-        state.projectiles.push({
-          id: `boss_proj_${Date.now()}`,
-          x: enemy.x + enemy.width / 2,
-          y: enemy.y + enemy.height / 2,
-          vx: Math.cos(angle) * 4.8,
-          vy: Math.sin(angle) * 4.8,
-          radius: 9,
-          fromPlayer: false,
-          color: enemy.phase === 1 ? '#10b981' : enemy.phase === 2 ? '#38bdf8' : '#f97316',
-          damage: 1,
-          lifespan: 3.5
-        });
+      if (enemy.bossAction === 'hover') {
+        enemy.x = enemy.patrolStartX + Math.cos(enemy.timer * 1.4) * 190;
+        enemy.y = enemy.startY + Math.sin(enemy.timer * 2.6) * 35;
+
+        // Shoot spore pellets
+        if (enemy.shootTimer > 2.4) {
+          enemy.shootTimer = 0;
+          const angle = Math.atan2((p.y + p.height / 2) - enemy.y, (p.x + p.width / 2) - enemy.x);
+          state.projectiles.push({
+            id: `drona_spore_${Date.now()}`,
+            x: enemy.x + enemy.width / 2,
+            y: enemy.y + enemy.height / 2,
+            vx: Math.cos(angle) * 4.2,
+            vy: Math.sin(angle) * 4.2,
+            radius: 8,
+            fromPlayer: false,
+            color: '#10b981',
+            damage: 1,
+            lifespan: 3.5
+          });
+        }
+
+        if (enemy.actionTimer > 4.5) {
+          enemy.bossAction = 'swoop';
+          enemy.actionTimer = 0;
+        }
+      } else if (enemy.bossAction === 'swoop') {
+        // Swoop down to low elevation near the ground
+        enemy.y += (350 - enemy.y) * 3.5 * dt;
+        if (enemy.y >= 335) {
+          enemy.bossAction = 'recharge';
+          enemy.actionTimer = 0;
+        }
+      } else if (enemy.bossAction === 'recharge') {
+        // Hover low and vulnerable for 2.6 seconds!
+        enemy.y = 350 + Math.sin(enemy.timer * 4) * 6;
+        if (Math.random() < 0.25) {
+          spawnSparkleParticles(state, enemy.x + (Math.random() * enemy.width), enemy.y, '#34d399');
+        }
+        if (enemy.actionTimer > 2.6) {
+          enemy.bossAction = 'hover';
+          enemy.actionTimer = 0;
+        }
       }
+
+    } else if (enemy.type === 'cryo_boss') {
+      // Sektor 2 Boss: Cryo-Titan (Ground Slam & Stun in Ice!)
+      enemy.bossAction = enemy.bossAction || 'hover';
+      enemy.actionTimer = (enemy.actionTimer || 0) + dt;
+      enemy.shootTimer = (enemy.shootTimer || 0) + dt;
+
+      if (enemy.bossAction === 'hover') {
+        // Smoothly float and track player's horizontal position
+        enemy.y = (enemy.startY || 160) + Math.sin(enemy.timer * 3) * 15;
+        const targetX = p.x + p.width / 2 - enemy.width / 2;
+        enemy.x += (targetX - enemy.x) * 1.8 * dt;
+
+        // Shoot vertical icicle shards
+        if (enemy.shootTimer > 1.6) {
+          enemy.shootTimer = 0;
+          state.projectiles.push({
+            id: `icicle_${Date.now()}`,
+            x: enemy.x + enemy.width / 2,
+            y: enemy.y + enemy.height,
+            vx: (Math.random() - 0.5) * 1.5,
+            vy: 5.2,
+            radius: 8,
+            fromPlayer: false,
+            color: '#38bdf8',
+            damage: 1,
+            lifespan: 2.5
+          });
+        }
+
+        if (enemy.actionTimer > 3.4) {
+          enemy.bossAction = 'aim';
+          enemy.actionTimer = 0;
+          enemy.slamTargetX = p.x + p.width / 2 - enemy.width / 2;
+        }
+      } else if (enemy.bossAction === 'aim') {
+        // Target lock telegraph warning with jitter
+        const baseTarget = enemy.slamTargetX || enemy.x;
+        enemy.x = baseTarget + (Math.random() - 0.5) * 7;
+        if (Math.random() < 0.3) {
+          spawnSparkleParticles(state, enemy.x + enemy.width / 2, enemy.y + enemy.height, '#f43f5e');
+        }
+
+        if (enemy.actionTimer > 1.1) {
+          enemy.bossAction = 'slam';
+          enemy.actionTimer = 0;
+          enemy.vy = 18;
+        }
+      } else if (enemy.bossAction === 'slam') {
+        // High speed ground slam!
+        enemy.y += enemy.vy;
+        if (enemy.y >= 380) {
+          enemy.y = 380;
+          enemy.vy = 0;
+          state.screenShake = 0.35;
+          soundManager.playStomp();
+          spawnSparkleParticles(state, enemy.x + enemy.width / 2, enemy.y + enemy.height, '#38bdf8');
+          // Twin ice shockwaves on floor
+          state.projectiles.push(
+            {
+              id: `wave_l_${Date.now()}`,
+              x: enemy.x,
+              y: 440,
+              vx: -5.5,
+              vy: 0,
+              radius: 8,
+              fromPlayer: false,
+              color: '#bae6fd',
+              damage: 1,
+              lifespan: 1.8
+            },
+            {
+              id: `wave_r_${Date.now()}`,
+              x: enemy.x + enemy.width,
+              y: 440,
+              vx: 5.5,
+              vy: 0,
+              radius: 8,
+              fromPlayer: false,
+              color: '#bae6fd',
+              damage: 1,
+              lifespan: 1.8
+            }
+          );
+          enemy.bossAction = 'stunned';
+          enemy.actionTimer = 0;
+        }
+      } else if (enemy.bossAction === 'stunned') {
+        // Stuck in the ice floor, completely helpless for 3.5 seconds!
+        enemy.y = 380;
+        if (Math.random() < 0.25) {
+          spawnSparkleParticles(state, enemy.x + (Math.random() * enemy.width), enemy.y, '#fef08a');
+        }
+        if (enemy.actionTimer > 3.5) {
+          enemy.bossAction = 'recover';
+          enemy.actionTimer = 0;
+        }
+      } else if (enemy.bossAction === 'recover') {
+        // Ascends back up to floating height
+        enemy.y += ((enemy.startY || 160) - enemy.y) * 4 * dt;
+        if (enemy.y <= (enemy.startY || 160) + 10) {
+          enemy.bossAction = 'hover';
+          enemy.actionTimer = 0;
+        }
+      }
+
+    } else if (enemy.type === 'pyro_boss') {
+      // Sektor 3 Boss: Magma-Vulcanor (Mortar Barrage & Overheat Venting)
+      enemy.bossAction = enemy.bossAction || 'mortar';
+      enemy.actionTimer = (enemy.actionTimer || 0) + dt;
+      enemy.shootTimer = (enemy.shootTimer || 0) + dt;
+
+      if (enemy.bossAction === 'mortar') {
+        // Patrol ground floor
+        enemy.x += enemy.vx;
+        if (enemy.x > enemy.patrolStartX + enemy.patrolRange) {
+          enemy.vx = -Math.abs(enemy.vx);
+          enemy.facing = 'left';
+        } else if (enemy.x < enemy.patrolStartX) {
+          enemy.vx = Math.abs(enemy.vx);
+          enemy.facing = 'right';
+        }
+
+        // Fire high-arcing parabolic lava mortars
+        if (enemy.shootTimer > 2.0) {
+          enemy.shootTimer = 0;
+          const dir = p.x < enemy.x ? -1 : 1;
+          state.projectiles.push({
+            id: `lava_mortar_${Date.now()}`,
+            x: enemy.x + enemy.width / 2,
+            y: enemy.y + 10,
+            vx: dir * (3.2 + Math.random() * 2.2),
+            vy: -8.5,
+            gravity: 0.28,
+            radius: 9,
+            fromPlayer: false,
+            color: '#f97316',
+            damage: 1,
+            lifespan: 3.5
+          });
+        }
+
+        if (enemy.actionTimer > 4.5) {
+          enemy.bossAction = 'overheat';
+          enemy.actionTimer = 0;
+        }
+      } else if (enemy.bossAction === 'overheat') {
+        // Stop moving, vent open with thick steam!
+        if (Math.random() < 0.4) {
+          spawnSparkleParticles(state, enemy.x + enemy.width / 2, enemy.y - 10, '#f8fafc');
+        }
+        if (enemy.actionTimer > 3.2) {
+          enemy.bossAction = 'mortar';
+          enemy.actionTimer = 0;
+        }
+      }
+
     } else if (enemy.type === 'zorgax_boss') {
       // Final Boss 3-phase AI
       enemy.shootTimer = (enemy.shootTimer || 0) + dt;
@@ -575,46 +852,111 @@ export function updatePhysics(
       }
 
       // Phase 1 (HP 6-5): Charges + dual lasers
-      // Phase 2 (HP 4-3): Plasma barrage
+      // Phase 2 (HP 4-3): Plasma barrage / Orbital Strike
       // Phase 3 (HP 2-1): Fast erratic leaps + energy rain
-      if (enemy.shootTimer > (enemy.health <= 2 ? 1.4 : 2.2)) {
+      if (enemy.shootTimer > (enemy.health <= 2 ? 1.3 : 2.0)) {
         enemy.shootTimer = 0;
         const dir = p.x < enemy.x ? -1 : 1;
-        state.projectiles.push({
-          id: `zorgax_laser_${Date.now()}`,
-          x: enemy.x + (dir === 1 ? enemy.width : 0),
-          y: enemy.y + 40,
-          vx: dir * 6,
-          vy: 0,
-          radius: 10,
-          fromPlayer: false,
-          color: '#a855f7',
-          damage: 1,
-          lifespan: 3
-        });
+
+        if (enemy.health <= 2) {
+          // Phase 3: Triple spread plasma
+          for (let s = -1; s <= 1; s++) {
+            state.projectiles.push({
+              id: `zorgax_spread_${Date.now()}_${s}`,
+              x: enemy.x + enemy.width / 2,
+              y: enemy.y + 40,
+              vx: dir * 5.8,
+              vy: s * 2.2,
+              radius: 9,
+              fromPlayer: false,
+              color: '#c084fc',
+              damage: 1,
+              lifespan: 3
+            });
+          }
+        } else if (enemy.health <= 4) {
+          // Phase 2: Orbital sky strike
+          state.projectiles.push({
+            id: `zorgax_orbital_${Date.now()}`,
+            x: p.x + (Math.random() - 0.5) * 60,
+            y: 50,
+            vx: 0,
+            vy: 6.5,
+            radius: 11,
+            fromPlayer: false,
+            color: '#a855f7',
+            damage: 1,
+            lifespan: 2.5
+          });
+        } else {
+          // Phase 1: Heavy laser beam
+          state.projectiles.push({
+            id: `zorgax_laser_${Date.now()}`,
+            x: enemy.x + (dir === 1 ? enemy.width : 0),
+            y: enemy.y + 40,
+            vx: dir * 6.5,
+            vy: 0,
+            radius: 10,
+            fromPlayer: false,
+            color: '#a855f7',
+            damage: 1,
+            lifespan: 3
+          });
+        }
       }
     }
 
     // Player vs Enemy Collision
     if (checkAABB(p, enemy)) {
-      // Stomp check: falling onto enemy top
-      const isStomping = p.vy > 0 && p.y + p.height - p.vy <= enemy.y + 16;
+      const isBossStunned = enemy.bossAction === 'stunned' || enemy.bossAction === 'recharge' || enemy.bossAction === 'overheat';
+      // Stomp check: falling onto enemy top OR jumping onto stunned/vulnerable boss
+      const isFalling = p.vy > 0;
+      const isAbove = (p.y + p.height) <= (enemy.y + enemy.height * 0.75);
+      const isStomping = (isFalling && isAbove) || (isBossStunned && isFalling);
 
       if (isStomping && enemy.type !== 'spikon') {
         // Player stomps enemy
-        p.vy = -10.5; // Bounce up
+        p.vy = -11.5; // High satisfying bounce
+        p.squashStretch = 1.35;
         soundManager.playStomp();
         spawnSparkleParticles(state, enemy.x + enemy.width / 2, enemy.y, '#f59e0b');
 
         enemy.health -= 1;
+        enemy.hitFlashTimer = 0.3;
+
+        // Visual feedback when hitting stunned boss
+        if (isBossStunned) {
+          spawnSparkleParticles(state, enemy.x + enemy.width / 2, enemy.y, '#38bdf8');
+          state.screenShake = 0.2;
+        }
+
         if (enemy.health <= 0) {
           enemy.isDefeated = true;
-          p.score += enemy.type.includes('boss') ? 2000 : 200;
           if (enemy.type.includes('boss')) {
+            enemy.defeatTimer = 2.2;
+            state.bossDefeatTimer = 2.2;
+            state.bossDefeatedName = enemy.type;
+            p.score += 3000;
             soundManager.playLevelClear();
             spawnBossExplosion(state, enemy.x + enemy.width / 2, enemy.y + enemy.height / 2);
+            for (let s = 0; s < 6; s++) {
+              state.items.push({
+                id: `stardust_boss_${Date.now()}_${s}`,
+                type: 'stardust',
+                x: enemy.x + (Math.random() - 0.5) * 120,
+                y: enemy.y + (Math.random() - 0.5) * 80,
+                width: 24,
+                height: 24,
+                collected: false
+              });
+            }
+          } else {
+            p.score += 200;
           }
         }
+      } else if (isBossStunned) {
+        // Player safely brushed against stunned boss without jumping: gentle push back, no damage
+        p.vx = p.x < enemy.x ? -3 : 3;
       } else {
         // Player gets hit by enemy
         handlePlayerHit(state);
@@ -622,11 +964,32 @@ export function updatePhysics(
     }
   }
 
-  // Goal Check
-  const distToGoal = Math.hypot(p.x + p.width / 2 - state.cameraX, p.y + p.height / 2 - 380);
-  const bossRemaining = state.enemies.some(e => e.type.includes('boss') && !e.isDefeated);
+  // Boss Defeat Sequence Timer
+  if (state.bossDefeatTimer !== undefined) {
+    state.bossDefeatTimer -= dt;
+    // Continuing celebratory sparks during dramatic defeat slow-mo
+    if (Math.random() < 0.45) {
+      spawnSparkleParticles(
+        state,
+        state.goal.x + (Math.random() - 0.5) * 180,
+        state.goal.y - Math.random() * 120,
+        ['#10b981', '#38bdf8', '#f59e0b', '#a855f7', '#ec4899'][Math.floor(Math.random() * 5)]
+      );
+    }
+    if (state.bossDefeatTimer <= 0) {
+      delete state.bossDefeatTimer;
+      levelCleared = true;
+      state.isLevelCleared = true;
+      soundManager.playLevelClear();
+    }
+  }
 
-  if (!bossRemaining && Math.abs(p.x - (state.levelWidth - 250)) < 120) {
+  // Goal Check
+  const bossRemaining = state.enemies.some(e => e.type.includes('boss') && !e.isDefeated);
+  const distToGoalX = Math.abs((p.x + p.width / 2) - state.goal.x);
+  const distToGoalY = Math.abs((p.y + p.height / 2) - state.goal.y);
+
+  if (!bossRemaining && distToGoalX < 60 && distToGoalY < 85) {
     levelCleared = true;
     state.isLevelCleared = true;
     soundManager.playLevelClear();
