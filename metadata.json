@@ -1,0 +1,6 @@
+{
+  "name": "Astro Bima: Lompatan Menuju Galaksi Kristal",
+  "description": "Game platformer 2D side-scrolling luar angkasa bertualang di Nébula Prisma bersama Bima si rakun antariksa.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
